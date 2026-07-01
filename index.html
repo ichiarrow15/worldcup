@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>FIFAワールドカップ2026 予想ポイントゲーム（拡張版）</title>
+<style>
+body { font-family: sans-serif; background:#0b1726; color:#fff; margin:0; }
+header { background:#0044aa; padding:20px; text-align:center; }
+section { background:#111827; margin:16px; padding:16px; border-radius:8px; }
+input, button, select { padding:6px; margin:4px; border-radius:4px; }
+.match-card { border:1px solid #333; padding:12px; margin-bottom:12px; border-radius:6px; }
+.admin-panel { display:none; background:#222; padding:12px; border-radius:6px; max-height:300px; overflow:auto; }
+.badge { display:inline-block; padding:2px 6px; border-radius:4px; font-size:11px; margin-left:4px; background:#1f2937; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>FIFAワールドカップ2026 予想ポイントゲーム</h1>
+  <p>無料ポイント制の予想ゲームです（賭博ではありません）</p>
+</header>
+
+<section>
+  <h2>プレイヤー登録</h2>
+  <input id="nickname" placeholder="ニックネーム">
+  <button onclick="saveUser()">登録</button>
+  <p id="userInfo"></p>
+</section>
+
+<section>
+  <h2>試合一覧（予想入力）</h2>
+  <div id="matchList"></div>
+</section>
+
+<section>
+  <h2>獲得ポイント</h2>
+  <p>合計: <span id="totalPoints">0</span> pt</p>
+  <table border="1" width="100%">
+    <thead>
+      <tr>
+        <th>#</th><th>ステージ</th><th>試合</th><th>結果</th><th>予想</th><th>ポイント</th>
+      </tr>
+    </thead>
+    <tbody id="pointsTable"></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>管理者用（結果入力・全104試合対応）</h2>
+  <input id="adminPass" type="password" placeholder="管理者パスワード">
+  <button onclick="openAdmin()">ログイン</button>
+
+  <div id="adminPanel" class="admin-panel">
+    <h3>試合結果入力</h3>
+    <table border="1" width="100%">
+      <thead>
+        <tr>
+          <th>#</th><th>ステージ</th><th>試合</th><th>結果</th><th>入力</th>
+        </tr>
+      </thead>
+      <tbody id="adminTable"></tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+// ===============================
+// ユーザー・予想データ（localStorage）
+// ===============================
+let user = JSON.parse(localStorage.getItem("wc_user")) || null;
+let picks = JSON.parse(localStorage.getItem("wc_picks")) || {}; // {matchId:{h,a}}
+let matches = []; // 最適化済み形式: {id, home, away, kickoff, stage, group, result}
+
+// ===============================
+// プレイヤー
+// ===============================
+function saveUser() {
+  const name = document.getElementById("nickname").value.trim();
+  if (!name) return alert("ニックネームを入力してください");
+  user = { nickname: name };
+  localStorage.setItem("wc_user", JSON.stringify(user));
+  renderUser();
+}
+function renderUser() {
+  document.getElementById("userInfo").textContent =
+    user ? `現在のプレイヤー: ${user.nickname}` : "未登録";
+}
+renderUser();
+
+// ===============================
+// 外部JSON（公式日程）→ サイト用形式に最適化
+// fixtures.json の構造例:
+// { "fixtures":[ { "matchNumber":1, "homeTeam":"Mexico", "awayTeam":"South Africa",
+//   "kickoffUtc":"2026-06-11T19:00:00Z", "stage":"group-stage", "group":"A" }, ... ] }
+fetch("fixtures.json")
+  .then(res => res.json())
+  .then(data => {
+    matches = data.fixtures.map(f => ({
+      id: f.matchNumber,
+      home: f.homeTeam,
+      away: f.awayTeam,
+      kickoff: f.kickoffUtc,
+      stage: f.stage,   // group-stage / round-of-16 / quarter-finals / semi-finals / final など
+      group: f.group || null,
+      result: null      // {h,a} を後で管理者が入力
+    }));
+    renderMatches();
+    renderPoints();
+    renderAdminTable();
+  })
+  .catch(err => {
+    console.error(err);
+    alert("fixtures.json の読み込みに失敗しました");
+  });
+
+// ===============================
+// 試合一覧（予想入力）全104試合対応
+// ===============================
+function renderMatches() {
+  const container = document.getElementById("matchList");
+  container.innerHTML = "";
+
+  const now = new Date();
+
+  matches.forEach(m => {
+    const kickoff = new Date(m.kickoff);
+    const locked = now >= kickoff;
+
+    const card = document.createElement("div");
+    card.className = "match-card";
+
+    const stageLabel = stageDisplay(m.stage, m.group);
+
+    card.innerHTML = `
+      <strong>#${m.id} ${m.home} vs ${m.away}</strong>
+      <span class="badge">${stageLabel}</span><br>
+      キックオフ: ${kickoff.toLocaleString()}<br>
+    `;
+
+    const ph = document.createElement("input");
+    ph.type = "number";
+    ph.placeholder = "ホーム得点";
+    const pa = document.createElement("input");
+    pa.type = "number";
+    pa.placeholder = "アウェイ得点";
+
+    if (picks[m.id]) {
+      ph.value = picks[m.id].h;
+      pa.value = picks[m.id].a;
+    }
+
+    const btn = document.createElement("button");
+    btn.textContent = "予想保存";
+
+    if (locked) {
+      ph.disabled = true;
+      pa.disabled = true;
+      btn.disabled = true;
+    }
+
+    btn.onclick = () => {
+      const h = parseInt(ph.value);
+      const a = parseInt(pa.value);
+      if (isNaN(h) || isNaN(a)) return alert("得点を入力してください");
+
+      picks[m.id] = { h, a };
+      localStorage.setItem("wc_picks", JSON.stringify(picks));
+      renderPoints();
+    };
+
+    card.appendChild(ph);
+    card.appendChild(pa);
+    card.appendChild(btn);
+
+    if (m.result) {
+      card.innerHTML += `<br><span style="color:#0f0;">結果: ${m.result.h}-${m.result.a}</span>`;
+    }
+
+    container.appendChild(card);
+  });
+}
+
+// ステージ表示用
+function stageDisplay(stage, group) {
+  if (stage === "group-stage") return `グループ${group}`;
+  if (stage === "round-of-32") return "ラウンド32";
+  if (stage === "round-of-16") return "ラウンド16";
+  if (stage === "quarter-finals") return "準々決勝";
+  if (stage === "semi-finals") return "準決勝";
+  if (stage === "third-place") return "3位決定戦";
+  if (stage === "final") return "決勝";
+  return stage;
+}
+
+// ===============================
+// ポイント計算（グループ / 決勝トーナメントで変える）
+// ===============================
+// 例:
+// グループステージ: 勝敗的中 3pt + スコア完全一致 5pt
+// 決勝トーナメント: 勝敗的中 5pt + スコア完全一致 10pt
+function calcPoints(m, p) {
+  if (!m.result) return 0;
+
+  const realDiff = m.result.h - m.result.a;
+  const predDiff = p.h - p.a;
+
+  const realOutcome = realDiff > 0 ? "H" : realDiff < 0 ? "A" : "D";
+  const predOutcome = predDiff > 0 ? "H" : predDiff < 0 ? "A" : "D";
+
+  const isGroup = m.stage === "group-stage";
+
+  const outcomePts = isGroup ? 3 : 5;
+  const exactPts   = isGroup ? 5 : 10;
+
+  let pts = 0;
+  if (realOutcome === predOutcome) pts += outcomePts;
+  if (m.result.h === p.h && m.result.a === p.a) pts += exactPts;
+
+  return pts;
+}
+
+function renderPoints() {
+  const tbody = document.getElementById("pointsTable");
+  tbody.innerHTML = "";
+
+  let total = 0;
+
+  matches.forEach(m => {
+    if (!m.result) return;
+
+    const tr = document.createElement("tr");
+    const p = picks[m.id];
+
+    const stageLabel = stageDisplay(m.stage, m.group);
+
+    const pts = p ? calcPoints(m, p) : 0;
+    if (p) total += pts;
+
+    tr.innerHTML = `
+      <td>${m.id}</td>
+      <td>${stageLabel}</td>
+      <td>${m.home} vs ${m.away}</td>
+      <td>${m.result.h}-${m.result.a}</td>
+      <td>${p ? `${p.h}-${p.a}` : "未予想"}</td>
+      <td>${pts}</td>
+    `;
+
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById("totalPoints").textContent = total;
+}
+
+// ===============================
+// 管理者パネル（全104試合対応）
+// ===============================
+function openAdmin() {
+  const pass = document.getElementById("adminPass").value;
+  if (pass === "admin2026") {
+    document.getElementById("adminPanel").style.display = "block";
+  } else {
+    alert("パスワードが違います");
+  }
+}
+
+function renderAdminTable() {
+  const tbody = document.getElementById("adminTable");
+  tbody.innerHTML = "";
+
+  matches.forEach(m => {
+    const tr = document.createElement("tr");
+    const stageLabel = stageDisplay(m.stage, m.group);
+
+    const hInput = document.createElement("input");
+    hInput.type = "number";
+    hInput.placeholder = "H";
+    const aInput = document.createElement("input");
+    aInput.type = "number";
+    aInput.placeholder = "A";
+
+    if (m.result) {
+      hInput.value = m.result.h;
+      aInput.value = m.result.a;
+    }
+
+    const btn = document.createElement("button");
+    btn.textContent = "登録";
+    btn.onclick = () => {
+      const h = parseInt(hInput.value);
+      const a = parseInt(aInput.value);
+      if (isNaN(h) || isNaN(a)) return alert("得点を入力してください");
+
+      m.result = { h, a };
+      renderMatches();
+      renderPoints();
+      renderAdminTable();
+    };
+
+    const tdIdx = document.createElement("td");
+    tdIdx.textContent = m.id;
+
+    const tdStage = document.createElement("td");
+    tdStage.textContent = stageLabel;
+
+    const tdMatch = document.createElement("td");
+    tdMatch.textContent = `${m.home} vs ${m.away}`;
+
+    const tdResult = document.createElement("td");
+    tdResult.textContent = m.result ? `${m.result.h}-${m.result.a}` : "-";
+
+    const tdInput = document.createElement("td");
+    tdInput.appendChild(hInput);
+    tdInput.appendChild(aInput);
+    tdInput.appendChild(btn);
+
+    tr.appendChild(tdIdx);
+    tr.appendChild(tdStage);
+    tr.appendChild(tdMatch);
+    tr.appendChild(tdResult);
+    tr.appendChild(tdInput);
+
+    tbody.appendChild(tr);
+  });
+}
+</script>
+
+</body>
+</html>
