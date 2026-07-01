@@ -2,22 +2,25 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>FIFAワールドカップ2026 予想ポイントゲーム（拡張版）</title>
+<title>W杯2026 予想ポイントゲーム（完全版）</title>
 <style>
 body { font-family: sans-serif; background:#0b1726; color:#fff; margin:0; }
 header { background:#0044aa; padding:20px; text-align:center; }
 section { background:#111827; margin:16px; padding:16px; border-radius:8px; }
 input, button, select { padding:6px; margin:4px; border-radius:4px; }
+button { cursor:pointer; }
 .match-card { border:1px solid #333; padding:12px; margin-bottom:12px; border-radius:6px; }
 .admin-panel { display:none; background:#222; padding:12px; border-radius:6px; max-height:300px; overflow:auto; }
 .badge { display:inline-block; padding:2px 6px; border-radius:4px; font-size:11px; margin-left:4px; background:#1f2937; }
+table { border-collapse:collapse; }
+th, td { padding:4px 6px; }
 </style>
 </head>
 <body>
 
 <header>
   <h1>FIFAワールドカップ2026 予想ポイントゲーム</h1>
-  <p>無料ポイント制の予想ゲームです（賭博ではありません）</p>
+  <p>無料ポイント制・サーバー保存・ランキング付き（賭博ではありません）</p>
 </header>
 
 <section>
@@ -46,12 +49,24 @@ input, button, select { padding:6px; margin:4px; border-radius:4px; }
 </section>
 
 <section>
-  <h2>管理者用（結果入力・全104試合対応）</h2>
+  <h2>ランキング（全ユーザー）</h2>
+  <table border="1" width="100%">
+    <thead>
+      <tr>
+        <th>順位</th><th>ユーザー</th><th>ポイント</th>
+      </tr>
+    </thead>
+    <tbody id="rankingTable"></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>管理者用（結果入力・全端末同期）</h2>
   <input id="adminPass" type="password" placeholder="管理者パスワード">
   <button onclick="openAdmin()">ログイン</button>
 
   <div id="adminPanel" class="admin-panel">
-    <h3>試合結果入力</h3>
+    <h3>試合結果入力（全104試合対応）</h3>
     <table border="1" width="100%">
       <thead>
         <tr>
@@ -63,23 +78,35 @@ input, button, select { padding:6px; margin:4px; border-radius:4px; }
   </div>
 </section>
 
+<!-- Firebase v8 SDK -->
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
 <script>
 // ===============================
-// ユーザー・予想データ（localStorage）
+// Firebase 初期化（自分の値に差し替え）
 // ===============================
-let user = JSON.parse(localStorage.getItem("wc_user")) || null;
-let picks = JSON.parse(localStorage.getItem("wc_picks")) || {}; // {matchId:{h,a}}
-let matches = []; // 最適化済み形式: {id, home, away, kickoff, stage, group, result}
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  databaseURL: "YOUR_DATABASE_URL"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
 
 // ===============================
-// プレイヤー
+// ユーザー情報（ローカル）
 // ===============================
+let user = JSON.parse(localStorage.getItem("wc_user")) || null;
+let matches = []; // [{id,home,away,kickoff,stage,group,result}]
+
 function saveUser() {
   const name = document.getElementById("nickname").value.trim();
   if (!name) return alert("ニックネームを入力してください");
   user = { nickname: name };
   localStorage.setItem("wc_user", JSON.stringify(user));
   renderUser();
+  renderMatches();   // ニックネーム変更後に予想表示を更新
+  renderPoints();
 }
 function renderUser() {
   document.getElementById("userInfo").textContent =
@@ -88,25 +115,39 @@ function renderUser() {
 renderUser();
 
 // ===============================
-// 外部JSON（公式日程）→ サイト用形式に最適化
-// fixtures.json の構造例:
-// { "fixtures":[ { "matchNumber":1, "homeTeam":"Mexico", "awayTeam":"South Africa",
-//   "kickoffUtc":"2026-06-11T19:00:00Z", "stage":"group-stage", "group":"A" }, ... ] }
+// fixtures.json → サイト用形式に変換 → サーバー保存
+// fixtures.json 例: { "fixtures":[ { "matchNumber":1, "homeTeam":"Mexico", ... } ] }
+// ===============================
 fetch("fixtures.json")
   .then(res => res.json())
   .then(data => {
-    matches = data.fixtures.map(f => ({
+    const arr = data.fixtures.map(f => ({
       id: f.matchNumber,
       home: f.homeTeam,
       away: f.awayTeam,
       kickoff: f.kickoffUtc,
-      stage: f.stage,   // group-stage / round-of-16 / quarter-finals / semi-finals / final など
+      stage: f.stage,
       group: f.group || null,
-      result: null      // {h,a} を後で管理者が入力
+      result: null
     }));
-    renderMatches();
-    renderPoints();
-    renderAdminTable();
+
+    const obj = {};
+    arr.forEach(m => { obj[m.id] = m; });
+
+    db.ref("matches").once("value", snap => {
+      if (!snap.exists()) {
+        db.ref("matches").set(obj);
+      }
+    });
+
+    db.ref("matches").on("value", snap => {
+      const val = snap.val();
+      if (!val) return;
+      matches = Object.values(val).sort((a, b) => a.id - b.id);
+      renderMatches();
+      renderPoints();
+      renderAdminTable();
+    });
   })
   .catch(err => {
     console.error(err);
@@ -114,73 +155,8 @@ fetch("fixtures.json")
   });
 
 // ===============================
-// 試合一覧（予想入力）全104試合対応
+// ステージ表示
 // ===============================
-function renderMatches() {
-  const container = document.getElementById("matchList");
-  container.innerHTML = "";
-
-  const now = new Date();
-
-  matches.forEach(m => {
-    const kickoff = new Date(m.kickoff);
-    const locked = now >= kickoff;
-
-    const card = document.createElement("div");
-    card.className = "match-card";
-
-    const stageLabel = stageDisplay(m.stage, m.group);
-
-    card.innerHTML = `
-      <strong>#${m.id} ${m.home} vs ${m.away}</strong>
-      <span class="badge">${stageLabel}</span><br>
-      キックオフ: ${kickoff.toLocaleString()}<br>
-    `;
-
-    const ph = document.createElement("input");
-    ph.type = "number";
-    ph.placeholder = "ホーム得点";
-    const pa = document.createElement("input");
-    pa.type = "number";
-    pa.placeholder = "アウェイ得点";
-
-    if (picks[m.id]) {
-      ph.value = picks[m.id].h;
-      pa.value = picks[m.id].a;
-    }
-
-    const btn = document.createElement("button");
-    btn.textContent = "予想保存";
-
-    if (locked) {
-      ph.disabled = true;
-      pa.disabled = true;
-      btn.disabled = true;
-    }
-
-    btn.onclick = () => {
-      const h = parseInt(ph.value);
-      const a = parseInt(pa.value);
-      if (isNaN(h) || isNaN(a)) return alert("得点を入力してください");
-
-      picks[m.id] = { h, a };
-      localStorage.setItem("wc_picks", JSON.stringify(picks));
-      renderPoints();
-    };
-
-    card.appendChild(ph);
-    card.appendChild(pa);
-    card.appendChild(btn);
-
-    if (m.result) {
-      card.innerHTML += `<br><span style="color:#0f0;">結果: ${m.result.h}-${m.result.a}</span>`;
-    }
-
-    container.appendChild(card);
-  });
-}
-
-// ステージ表示用
 function stageDisplay(stage, group) {
   if (stage === "group-stage") return `グループ${group}`;
   if (stage === "round-of-32") return "ラウンド32";
@@ -193,11 +169,89 @@ function stageDisplay(stage, group) {
 }
 
 // ===============================
+// 試合一覧（予想入力）
+// ===============================
+function renderMatches() {
+  const container = document.getElementById("matchList");
+  container.innerHTML = "";
+  const now = new Date();
+
+  if (!matches.length) return;
+
+  // ユーザーの予想を一括取得
+  let userPredictions = {};
+  if (user) {
+    db.ref(`predictions/${user.nickname}`).once("value", snap => {
+      userPredictions = snap.val() || {};
+      buildMatchCards(userPredictions);
+    });
+  } else {
+    buildMatchCards(userPredictions);
+  }
+
+  function buildMatchCards(preds) {
+    matches.forEach(m => {
+      const kickoff = new Date(m.kickoff);
+      const locked = now >= kickoff;
+
+      const card = document.createElement("div");
+      card.className = "match-card";
+
+      const stageLabel = stageDisplay(m.stage, m.group);
+
+      card.innerHTML = `
+        <strong>#${m.id} ${m.home} vs ${m.away}</strong>
+        <span class="badge">${stageLabel}</span><br>
+        キックオフ: ${kickoff.toLocaleString()}<br>
+      `;
+
+      const ph = document.createElement("input");
+      ph.type = "number";
+      ph.placeholder = "ホーム得点";
+      const pa = document.createElement("input");
+      pa.type = "number";
+      pa.placeholder = "アウェイ得点";
+
+      const existing = preds[m.id];
+      if (existing) {
+        ph.value = existing.h;
+        pa.value = existing.a;
+      }
+
+      const btn = document.createElement("button");
+      btn.textContent = "予想保存";
+
+      if (locked) {
+        ph.disabled = true;
+        pa.disabled = true;
+        btn.disabled = true;
+      }
+
+      btn.onclick = () => {
+        if (!user) return alert("プレイヤー登録してください");
+        const h = parseInt(ph.value);
+        const a = parseInt(pa.value);
+        if (isNaN(h) || isNaN(a)) return alert("得点を入力してください");
+        db.ref(`predictions/${user.nickname}/${m.id}`).set({ h, a });
+        renderPoints();
+      };
+
+      card.appendChild(ph);
+      card.appendChild(pa);
+      card.appendChild(btn);
+
+      if (m.result) {
+        card.innerHTML += `<br><span style="color:#0f0;">結果: ${m.result.h}-${m.result.a}</span>`;
+      }
+
+      container.appendChild(card);
+    });
+  }
+}
+
+// ===============================
 // ポイント計算（グループ / 決勝トーナメントで変える）
 // ===============================
-// 例:
-// グループステージ: 勝敗的中 3pt + スコア完全一致 5pt
-// 決勝トーナメント: 勝敗的中 5pt + スコア完全一致 10pt
 function calcPoints(m, p) {
   if (!m.result) return 0;
 
@@ -208,7 +262,6 @@ function calcPoints(m, p) {
   const predOutcome = predDiff > 0 ? "H" : predDiff < 0 ? "A" : "D";
 
   const isGroup = m.stage === "group-stage";
-
   const outcomePts = isGroup ? 3 : 5;
   const exactPts   = isGroup ? 5 : 10;
 
@@ -219,40 +272,76 @@ function calcPoints(m, p) {
   return pts;
 }
 
+// ===============================
+// 獲得ポイント表示 ＋ サーバー保存
+// ===============================
 function renderPoints() {
   const tbody = document.getElementById("pointsTable");
   tbody.innerHTML = "";
+  document.getElementById("totalPoints").textContent = 0;
 
-  let total = 0;
+  if (!user || !matches.length) return;
 
-  matches.forEach(m => {
-    if (!m.result) return;
+  db.ref(`predictions/${user.nickname}`).once("value", snap => {
+    const predictions = snap.val() || {};
+    let total = 0;
 
-    const tr = document.createElement("tr");
-    const p = picks[m.id];
+    matches.forEach(m => {
+      if (!m.result) return;
 
-    const stageLabel = stageDisplay(m.stage, m.group);
+      const p = predictions[m.id];
+      const pts = p ? calcPoints(m, p) : 0;
+      total += pts;
 
-    const pts = p ? calcPoints(m, p) : 0;
-    if (p) total += pts;
+      const tr = document.createElement("tr");
+      const stageLabel = stageDisplay(m.stage, m.group);
 
-    tr.innerHTML = `
-      <td>${m.id}</td>
-      <td>${stageLabel}</td>
-      <td>${m.home} vs ${m.away}</td>
-      <td>${m.result.h}-${m.result.a}</td>
-      <td>${p ? `${p.h}-${p.a}` : "未予想"}</td>
-      <td>${pts}</td>
-    `;
+      tr.innerHTML = `
+        <td>${m.id}</td>
+        <td>${stageLabel}</td>
+        <td>${m.home} vs ${m.away}</td>
+        <td>${m.result.h}-${m.result.a}</td>
+        <td>${p ? `${p.h}-${p.a}` : "未予想"}</td>
+        <td>${pts}</td>
+      `;
+      tbody.appendChild(tr);
+    });
 
-    tbody.appendChild(tr);
+    document.getElementById("totalPoints").textContent = total;
+    db.ref(`points/${user.nickname}`).set(total);
+    renderRanking();
   });
-
-  document.getElementById("totalPoints").textContent = total;
 }
 
 // ===============================
-// 管理者パネル（全104試合対応）
+// ランキング表示（全ユーザー）
+// ===============================
+function renderRanking() {
+  const tbody = document.getElementById("rankingTable");
+  tbody.innerHTML = "";
+
+  db.ref("points").once("value", snap => {
+    if (!snap.exists()) return;
+    const pointsData = snap.val(); // {nickname: pts}
+
+    const ranking = Object.entries(pointsData)
+      .map(([nickname, pts]) => ({ nickname, pts }))
+      .sort((a, b) => b.pts - a.pts);
+
+    ranking.forEach((r, index) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${index + 1}</td>
+        <td>${r.nickname}</td>
+        <td>${r.pts}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  });
+}
+
+// ===============================
+// 管理者パネル（結果入力 → 全端末同期）
 // ===============================
 function openAdmin() {
   const pass = document.getElementById("adminPass").value;
@@ -266,6 +355,7 @@ function openAdmin() {
 function renderAdminTable() {
   const tbody = document.getElementById("adminTable");
   tbody.innerHTML = "";
+  if (!matches.length) return;
 
   matches.forEach(m => {
     const tr = document.createElement("tr");
@@ -289,11 +379,7 @@ function renderAdminTable() {
       const h = parseInt(hInput.value);
       const a = parseInt(aInput.value);
       if (isNaN(h) || isNaN(a)) return alert("得点を入力してください");
-
-      m.result = { h, a };
-      renderMatches();
-      renderPoints();
-      renderAdminTable();
+      db.ref(`matches/${m.id}/result`).set({ h, a });
     };
 
     const tdIdx = document.createElement("td");
